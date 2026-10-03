@@ -1,0 +1,70 @@
+name: build
+
+# Builds a tagged version of the private source (hoon-ch/solpass) and publishes the signed
+# installers and latest.json here. Runs in this public repository because GitHub-hosted runners
+# are free for public repositories; the source is fetched with a read-only deploy key and is not
+# published. Start it with: gh workflow run build.yml -R hoon-ch/solpass-releases -f tag=vX.Y.Z
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "hoon-ch/solpass 의 릴리스 태그 (예: v0.3.8)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check tag format
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: '[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid tag: $TAG"; exit 1; }'
+      - uses: actions/checkout@v4
+        with:
+          repository: hoon-ch/solpass
+          ref: refs/tags/${{ inputs.tag }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+      - run: pnpm install --frozen-lockfile
+      - run: npm --prefix relay ci
+      - run: npm --prefix relay test
+      - run: cargo test
+        working-directory: src-tauri
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          owner: hoon-ch
+          repo: solpass-releases
+          releaseCommitish: main
+          tagName: ${{ inputs.tag }}
+          releaseName: "솔패스 __VERSION__"
+          releaseBody: "설치: Windows는 *_x64-setup.exe, macOS(Apple Silicon)는 *_aarch64.dmg. 이미 설치했다면 앱이 새 버전을 받아 자동으로 업데이트합니다."
+          releaseDraft: false
+          updaterJsonPreferNsis: true
+          # GitHub strips non-ASCII from asset names (the Korean product name), which breaks the
+          # bundle↔signature matching for latest.json. Upload under an ASCII name instead.
+          assetNamePattern: "SolPass_[version]_[arch][setup][ext]"
